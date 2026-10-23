@@ -35,7 +35,8 @@ def main():
                 }
         else:
             result = {"initialized": True}
-        secure_local_files()
+        if settings.database_url.startswith("sqlite:"):
+            secure_local_files()
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, FileNotFoundError, KeyError) as error:
         parser.exit(1, f"Ошибка: {error}\n")

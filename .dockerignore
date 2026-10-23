@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!pyproject.toml
+!training_bot/
+!training_bot/*.py

@@ -1,0 +1,46 @@
+name: training-bot
+services:
+  db:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trainer
+      POSTGRES_DB: trainer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.server}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # No host port: the database is reachable only inside the Compose network.
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=30", "-c", "work_mem=4MB"]
+    mem_limit: 384m
+    shm_size: 128m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trainer -d trainer"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  tools:
+    profiles: ["tools"]
+    image: training-bot:local
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://trainer:${POSTGRES_PASSWORD}@db:5432/trainer
+      TIMEZONE: Europe/Moscow
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 384m
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    command: ["status"]
+
+volumes:
+  postgres_data:
