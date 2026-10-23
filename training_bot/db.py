@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import (JSON, Boolean, Date, DateTime, Float, ForeignKey, Index,
-                        Integer, String, Text, UniqueConstraint, create_engine, event)
+                        Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -64,6 +64,7 @@ class SetRecord(Base):
     source_row: Mapped[int | None] = mapped_column(Integer)
     version: Mapped[int] = mapped_column(Integer, default=1)
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    mutation_tip: Mapped[str | None] = mapped_column(String(32))
 
 
 class ImportBatch(Base):
@@ -99,6 +100,13 @@ class Incoming(Base):
     created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class Operation(Base):
+    __tablename__ = "operations"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    account: Mapped[str] = mapped_column(String(80))
+    result: Mapped[dict] = mapped_column(JSON)
+
+
 class Usage(Base):
     __tablename__ = "usage"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -127,6 +135,10 @@ class Database:
 
     def init(self):
         Base.metadata.create_all(self.engine)
+        # Additive migration for the first deployed schema. No data is rewritten.
+        if "mutation_tip" not in {c["name"] for c in inspect(self.engine).get_columns("sets")}:
+            with self.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE sets ADD COLUMN mutation_tip VARCHAR(32)"))
 
     @contextmanager
     def session(self):

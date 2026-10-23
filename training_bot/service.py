@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 
 from sqlalchemy import case, extract, func, select, update
 
-from .db import (Alias, Conversation, Database, Draft, Exercise, SetRecord,
+from .db import (Alias, Conversation, Database, Draft, Exercise, Operation, SetRecord,
                  Usage, Workout, utcnow)
 from .importer import normalize
 from .schemas import (PrepareEdit, PrepareWorkout, QuerySets, QueryWorkouts,
@@ -223,7 +223,7 @@ class Journal:
                 for item in payload.sets:
                     ordinal = s.scalar(select(func.max(SetRecord.ordinal)).where(
                         SetRecord.workout_id == workout.id, SetRecord.exercise_code == item.exercise_code)) or 0
-                    row = SetRecord(workout_id=workout.id, ordinal=ordinal + 1, original=original,
+                    row = SetRecord(workout_id=workout.id, ordinal=ordinal + 1, original=original, mutation_tip=draft.id,
                                     **item.model_dump())
                     s.add(row)
                     s.flush()
@@ -234,23 +234,35 @@ class Journal:
                 row = self._owned_set(s, payload.set_id)
                 if row.version != payload.expected_version:
                     raise ValueError("Подход уже изменён. Подготовьте исправление заново")
-                fields = list(payload.replacement.model_fields)
+                fields = list(type(payload.replacement).model_fields)
                 before = {k: getattr(row, k) for k in fields} | {"uncertain": row.uncertain}
+                before_tip = row.mutation_tip
                 for key, value in payload.replacement.model_dump().items():
                     setattr(row, key, value)
                 row.uncertain = False
                 row.version += 1
-                result = {"set_id": row.id, "before": before, "new_version": row.version, "saved": 1}
+                row.mutation_tip = draft.id
+                result = {"set_id": row.id, "before": before, "before_tip": before_tip,
+                          "new_version": row.version, "saved": 1}
             draft.status, draft.result = "confirmed", result
             return result
 
-    def cancel(self):
+    def cancel(self, draft_id=None):
         with self.db.session() as s:
-            result = s.execute(update(Draft).where(Draft.account == self.account, Draft.status == "pending").values(status="cancelled"))
+            q = update(Draft).where(Draft.account == self.account, Draft.status == "pending")
+            if draft_id is not None:
+                q = q.where(Draft.id == draft_id)
+            result = s.execute(q.values(status="cancelled"))
             return {"cancelled_drafts": result.rowcount}
 
-    def undo(self):
+    def undo(self, source=None):
         with self.db.session() as s:
+            if source:
+                previous = s.get(Operation, source)
+                if previous:
+                    if previous.account != self.account:
+                        raise ValueError("Действие недоступно")
+                    return previous.result
             draft = s.scalar(select(Draft).where(Draft.account == self.account, Draft.status == "confirmed")
                              .order_by(Draft.created.desc()).with_for_update())
             if not draft:
@@ -259,20 +271,26 @@ class Journal:
             if draft.kind == "append":
                 for set_id in result["set_ids"]:
                     row = self._owned_set(s, set_id)
-                    if row.version != 1:
+                    if row.mutation_tip != draft.id:
                         raise ValueError("Сначала отмените исправления этих подходов")
                     row.deleted = True
+                    row.version += 1
+                    row.mutation_tip = None
             else:
                 row = self._owned_set(s, result["set_id"])
-                if row.version != result["new_version"]:
+                if row.mutation_tip != draft.id:
                     raise ValueError("Подход изменился после этой операции")
                 for key, value in result["before"].items():
                     setattr(row, key, value)
                 # Keep monotonic revisions; earlier edits cannot accidentally match stale drafts.
                 row.version += 1
+                row.mutation_tip = result.get("before_tip")
             draft.status = "undone"
             s.execute(update(Draft).where(Draft.account == self.account, Draft.status == "pending").values(status="superseded"))
-            return {"undone": draft.kind, "note": "Отменено последнее сохранённое действие бота"}
+            answer = {"undone": draft.kind, "note": "Отменено последнее сохранённое действие бота"}
+            if source:
+                s.add(Operation(key=source, account=self.account, result=answer))
+            return answer
 
     def finish(self):
         with self.db.session() as s:

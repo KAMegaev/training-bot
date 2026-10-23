@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///data/training.sqlite3"
     daily_token_limit: int = Field(default=150000, ge=1000)
     max_voice_seconds: int = Field(default=300, ge=1, le=600)
+    daily_audio_seconds: int = Field(default=1800, ge=1, le=86400)
 
     @property
     def tz(self) -> ZoneInfo:

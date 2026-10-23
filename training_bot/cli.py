@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
@@ -14,13 +15,25 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Создать таблицы базы данных")
     commands.add_parser("status", help="Показать количество записей владельца")
+    commands.add_parser("run", help="Запустить Telegram long polling")
+    commands.add_parser("disconnect-webhook", help="Отключить прежний webhook для переключения бота")
     importer = commands.add_parser("import-xlsx", help="Импортировать историю владельца из Excel")
     importer.add_argument("path", type=Path)
     args = parser.parse_args()
     settings = Settings()
+    if args.command == "disconnect-webhook":
+        from .telegram import disconnect_webhook
+        asyncio.run(disconnect_webhook(settings))
+        print('{"webhook_disconnected": true}')
+        return
     db = Database(settings.database_url)
     try:
-        db.init()
+        if args.command != "run":
+            db.init()
+        if args.command == "run":
+            from .telegram import run
+            asyncio.run(run(settings, db))
+            return
         if args.command == "import-xlsx":
             result = import_workbook(db, args.path)
         elif args.command == "status":
@@ -30,8 +43,8 @@ def main():
                     "workouts": s.scalar(select(func.count()).select_from(Workout).where(Workout.account == "owner")),
                     "sets": s.scalar(select(func.count()).select_from(SetRecord).join(Workout).where(
                         Workout.account == "owner", SetRecord.deleted.is_(False))),
-                    "telegram_connected": False,
-                    "note": "Это локальная подготовка; Telegram-обработчик ещё не реализован",
+                    "owner_configured": settings.owner_telegram_id > 0,
+                    "note": "Количество записей в базе; состояние процесса проверяется отдельно",
                 }
         else:
             result = {"initialized": True}

@@ -113,3 +113,34 @@ def test_unconfigured_owner_is_not_claimed_by_first_user():
 def test_date_range_validation():
     with pytest.raises(ValueError):
         RecordQuery(**period(start=date(2026, 2, 1), end=date(2026, 1, 1)))
+
+
+def test_undo_multiple_edits_then_append_preserves_revisions(journal):
+    added = journal.confirm(draft(journal)["draft_id"])
+    set_id = added["set_ids"][0]
+    for number, weight in enumerate([80, 85], start=1):
+        pending = journal.prepare("edit", PrepareEdit(set_id=set_id, expected_version=number,
+                                  replacement=set_data(weight=weight)), f"edit:{number}", "edit")
+        journal.confirm(pending["draft_id"])
+    journal.undo(source="undo:1")
+    # Redelivery does not undo a second action.
+    journal.undo(source="undo:1")
+    with journal.db.session() as s:
+        row = s.get(SetRecord, set_id)
+        assert row.weight == 80
+        assert row.version == 4
+    journal.undo(source="undo:2")
+    with journal.db.session() as s:
+        row = s.get(SetRecord, set_id)
+        assert row.weight == 75
+        assert row.version == 5
+    journal.undo(source="undo:3")
+    with journal.db.session() as s:
+        assert s.get(SetRecord, set_id).deleted is True
+
+
+def test_old_cancel_button_does_not_cancel_new_draft(journal):
+    old = draft(journal)
+    new = draft(journal, "test:2")
+    assert journal.cancel(old["draft_id"])["cancelled_drafts"] == 0
+    assert journal.context()["pending_draft"]["id"] == new["draft_id"]

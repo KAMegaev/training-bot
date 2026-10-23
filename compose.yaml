@@ -25,10 +25,33 @@ services:
         max-size: 10m
         max-file: "3"
 
+  bot:
+    image: training-bot:local
+    build: .
+    restart: unless-stopped
+    env_file: .env.bot
+    environment:
+      DATABASE_URL: postgresql+psycopg://training_app:${APP_DB_PASSWORD:?Configure application database role}@db:5432/trainer
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 384m
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    command: ["run"]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
   tools:
     profiles: ["tools"]
     image: training-bot:local
     build: .
+    env_file: .env.bot
     environment:
       DATABASE_URL: postgresql+psycopg://trainer:${POSTGRES_PASSWORD}@db:5432/trainer
       TIMEZONE: Europe/Moscow
