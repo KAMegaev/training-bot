@@ -17,6 +17,8 @@ def main():
     commands.add_parser("status", help="Показать количество записей владельца")
     commands.add_parser("run", help="Запустить Telegram long polling")
     commands.add_parser("disconnect-webhook", help="Отключить прежний webhook для переключения бота")
+    syncer = commands.add_parser("sync-sheets", help="Разово обновить Google-таблицу владельца")
+    syncer.add_argument("--force", action="store_true")
     importer = commands.add_parser("import-xlsx", help="Импортировать историю владельца из Excel")
     importer.add_argument("path", type=Path)
     args = parser.parse_args()
@@ -28,11 +30,16 @@ def main():
         return
     db = Database(settings.database_url)
     try:
-        if args.command != "run":
+        if args.command not in {"run", "sync-sheets"}:
             db.init()
         if args.command == "run":
             from .telegram import run
             asyncio.run(run(settings, db))
+            return
+        if args.command == "sync-sheets":
+            from .sheets import SheetMirror
+            result = SheetMirror(settings, db).sync_once(force=args.force)
+            print(json.dumps(result, ensure_ascii=False))
             return
         if args.command == "import-xlsx":
             result = import_workbook(db, args.path)

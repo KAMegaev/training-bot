@@ -351,3 +351,13 @@ class Journal:
                         data[k] = "'" + v
                 writer.writerow(data)
             return output.getvalue().encode("utf-8-sig")
+
+    def history_rows(self):
+        """One row per live set. Dates stay ISO until the presentation layer."""
+        query = QuerySets(exercise_code=None, start=None, end=None, exclude_uncertain=False,
+                          workout_id=None, min_weight=None, limit=40, offset=0)
+        with self.db.session() as s:
+            rows = s.execute(self._base(query).order_by(Workout.day.desc(), Workout.id.desc(), SetRecord.id)).all()
+            return [[str(w.day), e.name, r.ordinal, r.weight, r.reps, r.minutes, r.rpe,
+                     w.gym, w.trainer, w.week, w.program_session, r.note,
+                     "Да" if r.uncertain else "", e.code, w.id, r.id] for r, w, e in rows]

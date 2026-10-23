@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+google-service-account.json
+secrets/
 .venv/
 __pycache__/
 .pytest_cache/

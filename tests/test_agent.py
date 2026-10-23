@@ -95,6 +95,18 @@ async def test_unconfigured_user_gets_id_without_database_or_model(journal):
     assert client.responses.create.call_count == 0
 
 
+async def test_allowed_secondary_user_cannot_get_owner_spreadsheet(journal):
+    agent, client = fake_agent([])
+    agent.settings.allowed_telegram_ids = '99'
+    agent.settings.google_spreadsheet_id = 'private_owner_sheet_id'
+    app = Application(agent.settings, journal.db, agent)
+    message = NS(chat=NS(type='private', id=99), from_user=NS(id=99), message_id=1,
+                 text='/table', answer=AsyncMock())
+    await app.handle_message(message)
+    assert 'private_owner_sheet_id' not in message.answer.call_args.args[0]
+    assert 'владельца' in message.answer.call_args.args[0]
+
+
 async def test_daily_budget_prevents_model_call(journal):
     agent, client = fake_agent([])
     from datetime import datetime

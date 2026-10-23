@@ -16,6 +16,7 @@ from .config import Settings
 from .db import Database, Draft, Incoming
 from .schemas import QuerySets, QueryWorkouts
 from .service import Journal
+from .sheets import SheetMirror
 
 
 HELP = """Записывайте тренировку текстом или голосом, например:
@@ -30,6 +31,7 @@ HELP = """Записывайте тренировку текстом или го
 /undo — отменить последнее сохранение бота
 /finish — завершить тренировку
 /export — выгрузить все подходы в CSV
+/table — история в Google-таблице
 /usage — расход ИИ за сегодня
 /id — ваш Telegram ID
 """
@@ -144,6 +146,18 @@ class Application:
             elif command == "/export":
                 await message.answer_document(BufferedInputFile(journal.csv_export(), filename="workouts.csv"))
                 reply = Reply("Выгрузка всех подходов готова.")
+            elif command == "/table":
+                if journal.account != "owner":
+                    reply = Reply("Google-таблица пока подключена только для владельца.")
+                elif not self.settings.google_spreadsheet_id:
+                    reply = Reply("Google-таблица ещё не подключена.")
+                else:
+                    status = ("Изменения в журнале появляются примерно в течение минуты."
+                              if self.settings.google_credentials_file.is_file()
+                              else "Автообновление ещё не подключено.")
+                    reply = Reply("История тренировок: https://docs.google.com/spreadsheets/d/" + self.settings.google_spreadsheet_id
+                                  + "/edit#gid=" + str(self.settings.google_sheet_tab_id)
+                                  + "\n" + status)
             elif command.startswith("/"):
                 reply = Reply("Неизвестная команда. Список команд: /help")
             else:
@@ -212,6 +226,8 @@ async def run(settings: Settings, db: Database):
     router.callback_query.register(application.handle_callback, F.data.startswith("save:") | F.data.startswith("cancel:"))
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
+    stop = asyncio.Event()
+    mirror = asyncio.create_task(SheetMirror(settings, db).run(stop))
     try:
         webhook = await bot.get_webhook_info()
         if webhook.url:
@@ -222,6 +238,9 @@ async def run(settings: Settings, db: Database):
         await dispatcher.start_polling(bot, handle_as_tasks=False, close_bot_session=False,
                                        allowed_updates=["message", "callback_query"])
     finally:
+        stop.set()
+        mirror.cancel()
+        await asyncio.gather(mirror, return_exceptions=True)
         await agent.close()
         await bot.session.close()
 

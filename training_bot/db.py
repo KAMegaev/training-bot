@@ -107,6 +107,14 @@ class Operation(Base):
     result: Mapped[dict] = mapped_column(JSON)
 
 
+class SheetSync(Base):
+    __tablename__ = "sheet_sync"
+    key: Mapped[str] = mapped_column(String(250), primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64))
+    row_count: Mapped[int] = mapped_column(Integer)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Usage(Base):
     __tablename__ = "usage"
     id: Mapped[int] = mapped_column(primary_key=True)

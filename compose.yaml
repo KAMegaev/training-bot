@@ -30,8 +30,11 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env.bot
+    volumes:
+      - ./secrets:/run/google:ro
     environment:
       DATABASE_URL: postgresql+psycopg://training_app:${APP_DB_PASSWORD:?Configure application database role}@db:5432/trainer
+      GOOGLE_CREDENTIALS_FILE: /run/google/google-service-account.json
     depends_on:
       db:
         condition: service_healthy

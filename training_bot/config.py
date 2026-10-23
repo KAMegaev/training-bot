@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     daily_token_limit: int = Field(default=150000, ge=1000)
     max_voice_seconds: int = Field(default=300, ge=1, le=600)
     daily_audio_seconds: int = Field(default=1800, ge=1, le=86400)
+    google_spreadsheet_id: str = ""
+    google_sheet_tab_id: int = Field(default=0, ge=0)
+    google_credentials_file: Path = Path("google-service-account.json")
+    google_sync_interval_seconds: int = Field(default=60, ge=15, le=3600)
 
     @property
     def tz(self) -> ZoneInfo:
