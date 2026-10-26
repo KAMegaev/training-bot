@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     daily_audio_seconds: int = Field(default=1800, ge=1, le=86400)
     google_spreadsheet_id: str = ""
     google_sheet_tab_id: int = Field(default=0, ge=0)
+    google_exercises_tab_id: int | None = Field(default=None, ge=0)
     google_credentials_file: Path = Path("google-service-account.json")
     google_sync_interval_seconds: int = Field(default=60, ge=15, le=3600)
 

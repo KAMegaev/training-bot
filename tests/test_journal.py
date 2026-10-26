@@ -144,3 +144,23 @@ def test_old_cancel_button_does_not_cancel_new_draft(journal):
     new = draft(journal, "test:2")
     assert journal.cancel(old["draft_id"])["cancelled_drafts"] == 0
     assert journal.context()["pending_draft"]["id"] == new["draft_id"]
+
+
+def test_original_exercise_name_is_saved_and_survives_weight_edit(journal):
+    payload = PrepareWorkout(day=date(2026, 10, 23), workout_id=None, gym=None,
+                             trainer=None, week=None, program_session=None,
+                             sets=[set_data(raw_name='Название как написал пользователь')])
+    pending = journal.prepare('append', payload, 'raw:append', 'Исходная запись')
+    saved = journal.confirm(pending['draft_id'])
+    set_id = saved['set_ids'][0]
+    edit = journal.prepare('edit', PrepareEdit(set_id=set_id, expected_version=1,
+        replacement=set_data(weight=80)), 'raw:weight', 'Исправь вес на 80')
+    journal.confirm(edit['draft_id'])
+    with journal.db.session() as s:
+        assert s.get(SetRecord, set_id).raw_name == 'Название как написал пользователь'
+    renamed = journal.prepare('edit', PrepareEdit(set_id=set_id, expected_version=2,
+        replacement=set_data(raw_name='Другая пользовательская формулировка')), 'raw:name', 'Новое название')
+    journal.confirm(renamed['draft_id'])
+    journal.undo()
+    with journal.db.session() as s:
+        assert s.get(SetRecord, set_id).raw_name == 'Название как написал пользователь'

@@ -25,7 +25,8 @@ def metrics(weight, reps):
 def serialize_set(row, workout, exercise):
     return {"set_id": row.id, "version": row.version, "workout_id": workout.id,
             "date": str(workout.day), "gym": workout.gym, "exercise_code": exercise.code,
-            "exercise": exercise.name, "set_number": row.ordinal, "weight": row.weight,
+            "exercise": exercise.name, "raw_name": row.raw_name,
+            "set_number": row.ordinal, "weight": row.weight,
             "reps": row.reps, "minutes": row.minutes, "rpe": row.rpe, "note": row.note,
             "uncertain_mapping": row.uncertain, "source_row": row.source_row,
             **metrics(row.weight, row.reps)}
@@ -169,6 +170,8 @@ class Journal:
     def _preview(self, s, draft):
         data = draft.payload
         lines = [f"Тренировка {data['day']}" if draft.kind == "append" else f"Исправление подхода #{data['set_id']}"]
+        if draft.kind == "append" and data.get("gym"):
+            lines[0] += f", {data['gym']}"
         items = data["sets"] if draft.kind == "append" else [data["replacement"]]
         for item in items:
             exercise = s.get(Exercise, item["exercise_code"])
@@ -234,10 +237,13 @@ class Journal:
                 row = self._owned_set(s, payload.set_id)
                 if row.version != payload.expected_version:
                     raise ValueError("Подход уже изменён. Подготовьте исправление заново")
-                fields = list(type(payload.replacement).model_fields)
+                changes = payload.replacement.model_dump()
+                if changes.get("raw_name") is None:
+                    changes.pop("raw_name", None)
+                fields = list(changes)
                 before = {k: getattr(row, k) for k in fields} | {"uncertain": row.uncertain}
                 before_tip = row.mutation_tip
-                for key, value in payload.replacement.model_dump().items():
+                for key, value in changes.items():
                     setattr(row, key, value)
                 row.uncertain = False
                 row.version += 1
@@ -358,6 +364,12 @@ class Journal:
                           workout_id=None, min_weight=None, limit=40, offset=0)
         with self.db.session() as s:
             rows = s.execute(self._base(query).order_by(Workout.day.desc(), Workout.id.desc(), SetRecord.id)).all()
-            return [[str(w.day), e.name, r.ordinal, r.weight, r.reps, r.minutes, r.rpe,
+            return [[str(w.day), e.name, r.raw_name, r.ordinal, r.weight, r.reps, r.minutes, r.rpe,
                      w.gym, w.trainer, w.week, w.program_session, r.note,
                      "Да" if r.uncertain else "", e.code, w.id, r.id] for r, w, e in rows]
+
+    def exercise_rows(self):
+        """Complete shared exercise catalog, including exercises with no recorded sets."""
+        with self.db.session() as s:
+            return [[e.code, e.name, e.muscle, e.equipment]
+                    for e in s.scalars(select(Exercise).order_by(Exercise.code))]

@@ -47,6 +47,8 @@ class SummaryQuery(Period):
 
 class SetInput(StrictModel):
     exercise_code: str = Field(min_length=1, max_length=24)
+    raw_name: str | None = Field(default=None, max_length=500,
+                                 description="Название упражнения дословно из сообщения пользователя; неизвестное — null")
     weight: float | None = Field(ge=-1000, le=2000)
     reps: int | None = Field(ge=1, le=1000)
     minutes: float | None = Field(gt=0, le=1440)
