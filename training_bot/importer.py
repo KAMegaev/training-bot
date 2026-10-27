@@ -64,13 +64,14 @@ def import_workbook(db: Database, path: Path, account: str = "owner") -> dict:
                     if not isinstance(row[1], datetime) or row[6] not in names:
                         raise ValueError(f"Нельзя импортировать строку {index}: дата или упражнение")
                     day = row[1].date()
-                    # Historic session number is missing; retain gym/program metadata.
-                    key = (day, row[2], row[3], row[4], row[18])
+                    key = day
                     if key not in workouts:
-                        workout = Workout(account=account, day=day, gym=row[2], trainer=row[3],
-                                          week=row[4], program_session=row[18], status="completed")
-                        s.add(workout)
-                        s.flush()
+                        workout = s.scalar(select(Workout).where(Workout.account == account, Workout.day == day))
+                        if workout is None:
+                            workout = Workout(account=account, day=day, gym=row[2], trainer=row[3],
+                                              week=row[4], program_session=row[18])
+                            s.add(workout)
+                            s.flush()
                         workouts[key] = workout.id
                     flagged = row[5] in uncertain_names
                     s.add(SetRecord(workout_id=workouts[key], exercise_code=names[row[6]],
@@ -88,7 +89,7 @@ def import_workbook(db: Database, path: Path, account: str = "owner") -> dict:
                           "first_date": str(min(all_dates)) if all_dates else None,
                           "last_date": str(max(all_dates)) if all_dates else None,
                           "sha256": digest,
-                          "session_grouping": "date + gym + trainer + program week + session number",
+                          "session_grouping": "account + date",
                           "uncertainty_rule": "any alias mapping note is conservatively flagged"}
                 s.add(ImportBatch(key=batch_key, report=report))
                 return report

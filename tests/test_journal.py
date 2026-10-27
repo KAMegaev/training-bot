@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from training_bot.config import Settings
-from training_bot.db import Database, Exercise, SetRecord, Workout
+from training_bot.db import Alias, Database, Exercise, SetRecord, Workout
 from training_bot.schemas import PrepareEdit, PrepareWorkout, QuerySets, QueryWorkouts, RecordQuery, SummaryQuery
 from training_bot.service import Journal, metrics
 
@@ -49,6 +49,25 @@ def test_record_searches_old_history_without_other_users(journal):
     assert recent["maximum_weight"] == 90
 
 
+def test_batch_search_keeps_exact_aliases_and_ambiguity_notes(journal):
+    with journal.db.session() as session:
+        session.add(Exercise(code='OTHER', name='Другой жим'))
+        session.flush()
+        session.add_all([
+            Alias(name='Жим под углом', normalized='жим под углом', exercise_code='TEST',
+                  note='снаряд не указан — принято как штанга'),
+            Alias(name='Жим под углом', normalized='жим под углом', exercise_code='OTHER', note=None),
+        ])
+    result = journal.search_exercises_batch(['Тестовое упражнение', 'Жим под углом', 'Жим под углом', 'Жим'])
+    assert len(result) == 3
+    assert result[0]['exact_match'] is True
+    assert [item['code'] for item in result[0]['candidates']] == ['TEST']
+    assert result[1]['exact_match'] is True
+    assert {item['code'] for item in result[1]['candidates']} == {'TEST', 'OTHER'}
+    assert any(item['mapping_note'] for item in result[1]['candidates'])
+    assert result[2]['exact_match'] is False
+
+
 def test_workout_scope_and_pagination(journal):
     query = QuerySets(**period(), workout_id=None, min_weight=None, limit=1, offset=0)
     first = journal.sets(query)
@@ -56,7 +75,7 @@ def test_workout_scope_and_pagination(journal):
     assert first["has_more"] is True
     assert first["sets"][0]["weight"] == 90
     assert journal.sets(query.model_copy(update={"workout_id": 3}))["sets"] == []
-    assert len(journal.workouts(QueryWorkouts(**period(), status="completed", limit=10))) == 2
+    assert len(journal.workouts(QueryWorkouts(**period(), limit=10))) == 2
 
 
 def test_summary_uses_all_matching_rows(journal):

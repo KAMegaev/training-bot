@@ -2,14 +2,20 @@ import csv
 import io
 import json
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
+from itertools import groupby
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, extract, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 
 from .db import (Alias, Conversation, Database, Draft, Exercise, Operation, SetRecord,
-                 Usage, Workout, utcnow)
+                 Usage, Workout, WriteContext, utcnow)
 from .importer import normalize
+from .notation import has_trainer_marker
 from .schemas import (PrepareEdit, PrepareWorkout, QuerySets, QueryWorkouts,
                       RecordQuery, SummaryQuery)
 
@@ -33,8 +39,18 @@ def serialize_set(row, workout, exercise):
 
 
 class Journal:
-    def __init__(self, db: Database, account: str):
+    def __init__(self, db: Database, account: str, timezone="Europe/Moscow"):
         self.db, self.account = db, account
+        self.tz = ZoneInfo(timezone)
+
+    def today(self):
+        return datetime.now(self.tz).date()
+
+    def default_workout_day(self, today=None):
+        today = today or self.today()
+        with self.db.session() as s:
+            context = s.get(WriteContext, self.account)
+            return context.workout_day if context and context.message_day == today else today
 
     def search_exercises(self, query: str):
         target = normalize(query)
@@ -53,6 +69,17 @@ class Journal:
             if score > candidates[code]["score"]:
                 candidates[code].update(score=round(score, 3), matched_alias=name, mapping_note=note)
         return sorted(candidates.values(), key=lambda x: x["score"], reverse=True)[:8]
+
+    def search_exercises_batch(self, queries):
+        results = []
+        for query in dict.fromkeys(queries):
+            candidates = self.search_exercises(query)
+            # Check the actual normalized name, not a rounded fuzzy score.
+            exact = [item for item in candidates
+                     if item["matched_alias"] and normalize(item["matched_alias"]) == normalize(query)]
+            results.append({"query": query, "exact_match": bool(exact),
+                            "candidates": exact or candidates})
+        return results
 
     def _base(self, query):
         q = select(SetRecord, Workout, Exercise).join(Workout, SetRecord.workout_id == Workout.id).join(Exercise)
@@ -83,11 +110,9 @@ class Journal:
 
     def workouts(self, query: QueryWorkouts):
         q = self._base(query)
-        if query.status != "all":
-            q = q.where(Workout.status == query.status)
-        q = q.with_only_columns(Workout.id, Workout.day, Workout.gym, Workout.status,
+        q = q.with_only_columns(Workout.id, Workout.day, Workout.gym,
                                 func.count(SetRecord.id).label("matching_sets")).group_by(
-                                    Workout.id, Workout.day, Workout.gym, Workout.status)
+                                    Workout.id, Workout.day, Workout.gym)
         with self.db.session() as s:
             return [dict(row._mapping) | {"day": str(row.day)} for row in s.execute(
                 q.order_by(Workout.day.desc(), Workout.id.desc()).limit(query.limit))]
@@ -135,10 +160,24 @@ class Journal:
             if s.get(Exercise, item.exercise_code) is None:
                 raise ValueError("Упражнение отсутствует в справочнике: " + item.exercise_code)
 
-    def prepare(self, kind: str, payload, source_message: str, original: str):
-        data = payload.model_dump(mode="json")
-        data["original"] = original
+    def prepare(self, kind: str, payload, source_message: str, original: str, *, received_day=None):
+        if kind == "append" and has_trainer_marker(original):
+            payload = payload.model_copy(update={"trainer": "да"})
         with self.db.session() as s:
+            if kind == "append":
+                # Continuations inherit existing workout metadata, regardless of
+                # legacy status or the gym guessed by the model.
+                workout = s.scalar(select(Workout).where(
+                    Workout.account == self.account, Workout.day == payload.day))
+                if workout:
+                    inherited = {key: getattr(workout, key) for key in
+                                 ("gym", "trainer", "week", "program_session")
+                                 if getattr(workout, key) is not None}
+                    if payload.trainer == "да":
+                        inherited["trainer"] = "да"
+                    payload = payload.model_copy(update=inherited)
+            data = payload.model_dump(mode="json")
+            data["original"] = original
             old = s.scalar(select(Draft).where(Draft.account == self.account, Draft.source_message == source_message))
             if old:
                 if old.kind != kind or old.payload != data:
@@ -164,6 +203,12 @@ class Journal:
                           kind=kind, payload=data)
             s.add(draft)
             s.flush()
+            if kind == "append":
+                values = dict(account=self.account, message_day=received_day or self.today(), workout_day=payload.day)
+                insert = pg_insert if self.db.engine.dialect.name == "postgresql" else sqlite_insert
+                s.execute(insert(WriteContext).values(**values).on_conflict_do_update(
+                    index_elements=[WriteContext.account],
+                    set_={key: values[key] for key in ("message_day", "workout_day")}))
             return {"draft_id": draft.id, "status": "pending", "preview": self._preview(s, draft),
                     "instruction": "Это черновик. Изменения записываются только кнопкой пользователя."}
 
@@ -172,13 +217,40 @@ class Journal:
         lines = [f"Тренировка {data['day']}" if draft.kind == "append" else f"Исправление подхода #{data['set_id']}"]
         if draft.kind == "append" and data.get("gym"):
             lines[0] += f", {data['gym']}"
+        if draft.kind == "append" and data.get("trainer"):
+            lines[0] += f", тренер: {data['trainer']}"
+        if draft.kind == "append":
+            if data.get("program_session") is not None:
+                lines[0] += f", занятие {data['program_session']}"
+            if data.get("week") is not None:
+                lines[0] += f", неделя {data['week']}"
         items = data["sets"] if draft.kind == "append" else [data["replacement"]]
-        for item in items:
-            exercise = s.get(Exercise, item["exercise_code"])
-            weight = "вес не указан" if item["weight"] is None else f"{item['weight']:g} кг"
-            performance = f"{weight} × {item['reps']}" if item["reps"] else f"{item['minutes']:g} мин"
-            lines.append(f"• {exercise.name}: {performance}" + (f"; {item['note']}" if item["note"] else "")
-                         + (f"; RPE {item['rpe']:g}" if item["rpe"] else ""))
+        # Group consecutive runs only: a return to an earlier weight or exercise
+        # must stay in its original position. Distinct notes/RPE remain visible.
+        for code, exercise_items in groupby(items, key=lambda item: item["exercise_code"]):
+            exercise = s.get(Exercise, code)
+            lines.extend(["", exercise.name])
+            fields = ("weight", "reps", "minutes", "rpe", "note")
+            for values, repeated in groupby(exercise_items, key=lambda item: tuple(item.get(k) for k in fields)):
+                weight, reps, minutes, rpe, note = values
+                count = sum(1 for _ in repeated)
+                if reps is not None:
+                    performance = (f"{weight:g}х{reps}" if weight is not None else
+                                   f"вес не указан × {reps}")
+                    if minutes is not None:
+                        performance += f"; {minutes:g} мин"
+                elif minutes is not None:
+                    performance = f"{minutes:g} мин"
+                    if weight is not None:
+                        performance += f"; {weight:g} кг"
+                else:
+                    performance = "" if weight is None else f"{weight:g} кг"
+                line = f"{performance} /{count}".strip()
+                if note:
+                    line += f"; {note}"
+                if rpe is not None:
+                    line += f"; RPE {rpe:g}"
+                lines.append(line)
         return "\n".join(lines)
 
     def _owned_set(self, s, set_id):
@@ -207,21 +279,28 @@ class Journal:
                 payload = PrepareWorkout.model_validate(data)
                 self._validate_codes(s, payload.sets)
                 if payload.workout_id:
-                    workout = s.get(Workout, payload.workout_id)
-                    if not workout or workout.account != self.account or workout.day != payload.day:
+                    requested = s.get(Workout, payload.workout_id)
+                    if not requested or requested.account != self.account or requested.day != payload.day:
                         raise ValueError("Тренировка недоступна")
-                else:
-                    q = select(Workout).where(Workout.account == self.account, Workout.day == payload.day,
-                                               Workout.status == "open")
-                    if payload.gym:
-                        q = q.where(Workout.gym == payload.gym)
-                    workout = s.scalar(q.order_by(Workout.id.desc()))
-                    if workout is None:
-                        workout = Workout(account=self.account, day=payload.day, gym=payload.gym,
-                                          trainer=payload.trainer, week=payload.week,
-                                          program_session=payload.program_session)
-                        s.add(workout)
-                        s.flush()
+                q = select(Workout).where(Workout.account == self.account, Workout.day == payload.day)
+                workout = s.scalar(q.with_for_update())
+                if workout is None:
+                    try:
+                        with s.begin_nested():
+                            workout = Workout(account=self.account, day=payload.day, gym=payload.gym,
+                                              trainer=payload.trainer, week=payload.week,
+                                              program_session=payload.program_session)
+                            s.add(workout)
+                            s.flush()
+                    except IntegrityError:
+                        # Another writer may have created this date while we waited.
+                        workout = s.scalar(q.with_for_update())
+                        if workout is None:
+                            raise
+                trainer_change = {}
+                if payload.trainer == "да" and workout.trainer != "да":
+                    trainer_change = {"trainer_before": workout.trainer, "trainer_after": "да"}
+                    workout.trainer = "да"
                 created_ids = []
                 for item in payload.sets:
                     ordinal = s.scalar(select(func.max(SetRecord.ordinal)).where(
@@ -231,7 +310,8 @@ class Journal:
                     s.add(row)
                     s.flush()
                     created_ids.append(row.id)
-                result = {"workout_id": workout.id, "set_ids": created_ids, "saved": len(created_ids)}
+                result = {"workout_id": workout.id, "set_ids": created_ids, "saved": len(created_ids),
+                          **trainer_change}
             else:
                 payload = PrepareEdit.model_validate(data)
                 row = self._owned_set(s, payload.set_id)
@@ -275,6 +355,11 @@ class Journal:
                 raise ValueError("Нет действий бота для отмены. Импортированная история не удаляется")
             result = draft.result
             if draft.kind == "append":
+                if "trainer_before" in result:
+                    workout = s.get(Workout, result["workout_id"])
+                    if workout.trainer != result["trainer_after"]:
+                        raise ValueError("Отметка тренера изменилась после этой операции")
+                    workout.trainer = result["trainer_before"]
                 for set_id in result["set_ids"]:
                     row = self._owned_set(s, set_id)
                     if row.mutation_tip != draft.id:
@@ -298,13 +383,8 @@ class Journal:
                 s.add(Operation(key=source, account=self.account, result=answer))
             return answer
 
-    def finish(self):
-        with self.db.session() as s:
-            result = s.execute(update(Workout).where(Workout.account == self.account, Workout.status == "open")
-                               .values(status="completed"))
-            return {"completed_workouts": result.rowcount}
-
-    def context(self):
+    def context(self, today=None):
+        today = today or self.today()
         with self.db.session() as s:
             conversation = s.get(Conversation, self.account)
             pending = s.scalar(select(Draft).where(Draft.account == self.account, Draft.status == "pending")
@@ -312,19 +392,24 @@ class Journal:
             last = s.execute(select(SetRecord, Workout, Exercise).join(Workout).join(Exercise)
                              .where(Workout.account == self.account, SetRecord.deleted.is_(False))
                              .order_by(Workout.day.desc(), SetRecord.id.desc()).limit(1)).first()
-            return {"recent_dialogue": conversation.turns if conversation else [],
+            history = [{"role": turn["role"], "content": turn["content"]}
+                       for turn in conversation.turns if turn.get("day") == str(today)] if conversation else []
+            writing = s.get(WriteContext, self.account)
+            default_day = writing.workout_day if writing and writing.message_day == today else today
+            return {"recent_dialogue": history, "default_workout_day": str(default_day),
                     "pending_draft": {"id": pending.id, "payload": pending.payload} if pending else None,
                     "latest_set": serialize_set(*last) if last else None}
 
-    def remember(self, user: str, assistant: str):
+    def remember(self, user: str, assistant: str, *, today=None):
         with self.db.session() as s:
             obj = s.get(Conversation, self.account)
             if not obj:
                 obj = Conversation(account=self.account, turns=[])
                 s.add(obj)
             # Dialogue is bounded; the complete training history remains queryable in SQL.
-            obj.turns = (obj.turns + [{"role": "user", "content": user[:6000]},
-                                      {"role": "assistant", "content": assistant[:6000]}])[-12:]
+            day = str(today or self.today())
+            obj.turns = (obj.turns + [{"role": "user", "content": user[:6000], "day": day},
+                                      {"role": "assistant", "content": assistant[:6000], "day": day}])[-12:]
 
     def token_usage(self, day: date):
         with self.db.session() as s:

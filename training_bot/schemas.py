@@ -12,6 +12,16 @@ class SearchExercises(StrictModel):
     query: str = Field(min_length=1, max_length=200)
 
 
+class SearchExercisesBatch(StrictModel):
+    queries: list[str] = Field(min_length=1, max_length=30)
+
+    @model_validator(mode="after")
+    def valid_queries(self):
+        if any(not query.strip() or len(query) > 200 for query in self.queries):
+            raise ValueError("Каждый запрос должен содержать одно название длиной 1–200 символов")
+        return self
+
+
 class Period(StrictModel):
     exercise_code: str | None
     start: date | None
@@ -33,7 +43,6 @@ class QuerySets(Period):
 
 
 class QueryWorkouts(Period):
-    status: Literal["all", "completed", "open"]
     limit: int = Field(ge=1, le=10)
 
 
@@ -57,7 +66,9 @@ class SetInput(StrictModel):
 
     @model_validator(mode="after")
     def meaningful(self):
-        if self.reps is None and self.minutes is None:
+        # AB06 is the catalog's "Комплекс экстензия-пресс": the user records
+        # completed rounds without a weight or a repetition count.
+        if self.reps is None and self.minutes is None and self.exercise_code != "AB06":
             raise ValueError("Укажите повторения или время; неизвестное число нельзя выдумывать")
         return self
 
@@ -72,10 +83,44 @@ class PrepareWorkout(StrictModel):
     sets: list[SetInput] = Field(min_length=1, max_length=60)
 
 
+class SetGroup(SetInput):
+    count: int = Field(default=1, ge=1, le=60,
+                       description="Количество одинаковых подходов; программа создаст отдельную строку для каждого")
+
+
+class PrepareWorkoutRequest(PrepareWorkout):
+    """Compact model payload; the journal still accepts individual sets only."""
+    continues_previous_request: bool = Field(default=False,
+        description="true только при ответе на уточняющий вопрос по ещё не подготовленной записи; для новой записи false")
+    sets: list[SetGroup] = Field(min_length=1, max_length=60)
+
+    @model_validator(mode="after")
+    def total_sets(self):
+        if sum(group.count for group in self.sets) > 60:
+            raise ValueError("За одно сохранение можно добавить не более 60 подходов")
+        return self
+
+    def expand(self) -> PrepareWorkout:
+        return PrepareWorkout.model_validate({
+            **self.model_dump(exclude={"sets", "continues_previous_request"}),
+            "sets": [group.model_dump(exclude={"count"})
+                     for group in self.sets for _ in range(group.count)],
+        })
+
+
 class PrepareEdit(StrictModel):
     set_id: int
     expected_version: int
     replacement: SetInput
+
+
+class ExerciseSelection(StrictModel):
+    exercise_index: int = Field(ge=0, description="Поле index из parsed_workout.exercises, НЕ номер упражнения в исходном тексте")
+    exercise_code: str = Field(min_length=1, max_length=24)
+
+
+class PrepareParsedWorkout(StrictModel):
+    exercises: list[ExerciseSelection] = Field(min_length=1, max_length=30)
 
 
 class Empty(StrictModel):

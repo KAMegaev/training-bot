@@ -16,10 +16,14 @@ def journal(tmp_path):
     with db.session() as s:
         s.add(Exercise(code='SYN', name='Синтетическое упражнение'))
         s.flush()
-        for account, weight in [('owner', None), ('owner', 0), ('owner', -20), ('telegram:99', 900)]:
-            workout = Workout(account=account, day=date(2026, 10, 1), trainer='Тренер', week=2)
-            s.add(workout)
-            s.flush()
+        workouts = {}
+        for account, weight in [('owner', -20), ('owner', 0), ('owner', None), ('telegram:99', 900)]:
+            if account not in workouts:
+                workout = Workout(account=account, day=date(2026, 10, 1), trainer='Тренер', week=2)
+                s.add(workout)
+                s.flush()
+                workouts[account] = workout
+            workout = workouts[account]
             s.add(SetRecord(workout_id=workout.id, exercise_code='SYN', ordinal=1,
                             weight=weight, reps=8, note='=SOME_FORMULA()', raw_name='Как записал пользователь'))
     yield Journal(db, 'owner')
@@ -138,7 +142,7 @@ def test_original_name_change_is_detected_independently(journal):
     sync = mirror(journal, google)
     sync.sync_once()
     with journal.db.session() as s:
-        s.get(SetRecord, 1).raw_name = 'Другое исходное название'
+        s.get(SetRecord, 3).raw_name = 'Другое исходное название'
     assert sync.sync_once()['changed']
     rows = next(r['updateCells']['rows'] for r in google.calls[-1] if 'updateCells' in r)
     assert rows[-1]['values'][2]['userEnteredValue'] == {'stringValue': 'Другое исходное название'}

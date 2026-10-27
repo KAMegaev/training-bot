@@ -42,7 +42,8 @@ class Workout(Base):
     trainer: Mapped[str | None] = mapped_column(String(100))
     week: Mapped[int | None] = mapped_column(Integer)
     program_session: Mapped[int | None] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(20), default="open")
+    # Legacy column retained for existing databases; routing uses account + day only.
+    status: Mapped[str] = mapped_column(String(20), default="recorded")
     created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -92,6 +93,13 @@ class Conversation(Base):
     turns: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class WriteContext(Base):
+    __tablename__ = "write_contexts"
+    account: Mapped[str] = mapped_column(String(80), primary_key=True)
+    message_day: Mapped[object] = mapped_column(Date)
+    workout_day: Mapped[object] = mapped_column(Date)
+
+
 class Incoming(Base):
     __tablename__ = "incoming"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
@@ -126,7 +134,7 @@ class Usage(Base):
     audio_seconds: Mapped[int] = mapped_column(Integer, default=0)
 
 
-Index("workouts_account_day", Workout.account, Workout.day)
+Index("workouts_account_day", Workout.account, Workout.day, unique=True)
 
 
 class Database:

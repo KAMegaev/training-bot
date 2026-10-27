@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description="База тренировок: локальные команды подготовки")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Создать таблицы базы данных")
+    commands.add_parser("migrate-calendar", help="Объединить тренировки по дате и запретить дубли")
     commands.add_parser("status", help="Показать количество записей владельца")
     commands.add_parser("run", help="Запустить Telegram long polling")
     commands.add_parser("disconnect-webhook", help="Отключить прежний webhook для переключения бота")
@@ -41,7 +42,10 @@ def main():
             result = SheetMirror(settings, db).sync_once(force=args.force)
             print(json.dumps(result, ensure_ascii=False))
             return
-        if args.command == "import-xlsx":
+        if args.command == "migrate-calendar":
+            from .calendar_migration import migrate_calendar
+            result = migrate_calendar(db, settings.timezone)
+        elif args.command == "import-xlsx":
             result = import_workbook(db, args.path)
         elif args.command == "status":
             with db.session() as s:

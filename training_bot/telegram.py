@@ -22,6 +22,8 @@ from .sheets import SheetMirror
 HELP = """Записывайте тренировку текстом или голосом, например:
 «Жим штанги лёжа: 60 кг на 10, три подхода».
 Проверьте черновик и нажмите «Сохранить».
+Одна дата — одна тренировка. Запись без даты продолжает предыдущую запись
+за этот день; первая запись в новый день без даты относится к сегодняшней дате.
 
 Можно спросить: «Какой мой рекорд в жиме за всё время?»
 
@@ -29,7 +31,6 @@ HELP = """Записывайте тренировку текстом или го
 /pending — текущий черновик
 /cancel — отменить черновик
 /undo — отменить последнее сохранение бота
-/finish — завершить тренировку
 /export — выгрузить все подходы в CSV
 /table — история в Google-таблице
 /usage — расход ИИ за сегодня
@@ -57,7 +58,7 @@ class Application:
 
     def journal(self, user_id):
         account = self.settings.account(user_id)
-        return Journal(self.db, account) if account else None
+        return Journal(self.db, account, self.settings.timezone) if account else None
 
     def recovered_reply(self, journal, source):
         """Recover after a process restart between preparing a draft and sending it."""
@@ -91,7 +92,7 @@ class Application:
 
     def last(self, journal):
         period = dict(exercise_code=None, start=None, end=None, exclude_uncertain=False)
-        workouts = journal.workouts(QueryWorkouts(**period, status="all", limit=1))
+        workouts = journal.workouts(QueryWorkouts(**period, limit=1))
         if not workouts:
             return Reply("Тренировок пока нет. Пришлите упражнения, веса и повторения.")
         workout = workouts[0]
@@ -101,8 +102,11 @@ class Application:
             result = journal.sets(QuerySets(**period, workout_id=workout["id"], min_weight=None, limit=40, offset=offset))
             for row in result["sets"]:
                 weight = "вес не указан" if row["weight"] is None else f"{row['weight']:g} кг"
-                performance = f"{weight} × {row['reps']}" if row["reps"] else f"{row['minutes']:g} мин" if row["minutes"] else weight
-                lines.append(f"• {row['exercise']}: {performance}" + (" [сопоставление требует проверки]" if row["uncertain_mapping"] else ""))
+                performance = (f"{weight} × {row['reps']}" if row["reps"] is not None else
+                               f"{row['minutes']:g} мин" if row["minutes"] is not None else
+                               "без веса и повторений" if row["weight"] is None else weight)
+                lines.append(f"• {row['exercise']}: {performance}" + (f"; {row['note']}" if row['note'] else "")
+                             + (" [сопоставление требует проверки]" if row["uncertain_mapping"] else ""))
             if not result["has_more"]:
                 break
             offset += 40
@@ -138,8 +142,8 @@ class Application:
                 journal.undo(source=source)
                 reply = Reply("Последнее сохранённое действие бота отменено.")
             elif command == "/finish":
-                result = journal.finish()
-                reply = Reply(f"Завершено тренировок: {result['completed_workouts']}.")
+                reply = Reply("Завершать тренировку не нужно: одна дата — одна тренировка. "
+                              "Новые подходы за ту же дату добавляются в неё.")
             elif command == "/usage":
                 usage = journal.token_usage(datetime.now(self.settings.tz).date())
                 reply = Reply(f"Сегодня: входных токенов {usage['input_tokens']}, выходных {usage['output_tokens']}, аудио {usage['audio_seconds']} сек. Лимит токенов: {self.settings.daily_token_limit}.")

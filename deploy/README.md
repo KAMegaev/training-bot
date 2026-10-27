@@ -20,6 +20,7 @@ python3 deploy/create_server_env.py
 docker compose --env-file .env.server up -d --wait db
 docker compose --env-file .env.server build tools
 docker compose --env-file .env.server run --rm tools init
+docker compose --env-file .env.server run --rm tools migrate-calendar
 python3 deploy/configure_app_role.py
 docker compose --env-file .env.server run --rm tools status
 ```
@@ -45,10 +46,19 @@ docker compose --env-file .env.server up -d bot
 docker compose --env-file .env.server logs --tail 20 bot
 ```
 
-При обновлении: получить код, выполнить build, `tools init`, настройку роли и
-`up -d --force-recreate bot`. Секреты не находятся в образе; база хранится в volume.
+При обновлении: получить код, выполнить build, остановить `bot`, сделать резервную
+копию, выполнить `tools init`, `tools migrate-calendar`, настройку роли и
+`up -d --force-recreate bot`. Миграция идемпотентна: объединяет тренировки по
+пользователю и дате, сохраняет подходы, обновляет ссылки черновиков и добавляет
+уникальный индекс. Новая таблица `write_contexts` хранит дату для записей без даты
+на текущий календарный день. Секреты не находятся в образе; база хранится в volume.
 Логи приложения не содержат текстов пользовательских сообщений и значений ключей.
 Проверьте `/id`, `/last`, вопрос о рекорде, черновик текстом/голосом и подтверждение.
+
+Для версии с разбором многострочных тренировок примените подтверждённые владельцем
+синонимы после сборки: `docker compose --env-file .env.server run --rm --entrypoint python bot -m training_bot.configure_aliases`.
+Команда идемпотентна: «Вертикальная тяга» → BK04, «Жим на наклонной скамье» → CH05.
+При конфликте справочника вся операция откатывается. Исторические подходы не меняются.
 
 ## Резервные копии
 

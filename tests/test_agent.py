@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from training_bot.agent import Agent, Reply, tool_definitions
+from training_bot.agent import Agent, Reply, only_unweighted_notation, tool_definitions
 from training_bot.audio import transcribe
 from training_bot.config import Settings
 from training_bot.db import Database, Exercise
@@ -64,6 +64,107 @@ async def test_tool_loop_searches_then_prepares_without_writing(journal):
     assert count_sets(journal) == 1
 
 
+async def test_batch_search_and_grouped_workout_expand_before_confirmation(journal):
+    data = workout()
+    data['gym'] = 'ReZone'
+    first = dict(data['sets'][0], count=4, raw_name='Синтетический жим',
+                 weight=15, reps=10, note='на каждую руку/ногу')
+    second = dict(data['sets'][0], count=2, weight=20, reps=8)
+    data['sets'] = [first, second]
+    agent, client = fake_agent([
+        model_response('search_exercises_batch', {'queries': ['Синтетический жим']}),
+        model_response('prepare_workout', data),
+    ])
+    reply = await agent.answer(journal, 'Синтетический жим 15х(10х2) /4, 20х8 /2', 'group:1')
+    assert reply.draft_id
+    assert count_sets(journal) == 0
+    payload = journal.context()['pending_draft']['payload']
+    assert len(payload['sets']) == 6
+    assert all('count' not in item for item in payload['sets'])
+    assert [item['weight'] for item in payload['sets']] == [15] * 4 + [20] * 2
+    assert all(item['note'] == 'на каждую руку/ногу' for item in payload['sets'][:4])
+    assert journal.confirm(reply.draft_id)['saved'] == 6
+    assert count_sets(journal) == 6
+
+
+async def test_group_limit_applies_to_expanded_sets(journal):
+    data = workout()
+    data['sets'] = [dict(data['sets'][0], count=31)] * 2
+    agent, client = fake_agent([model_response('prepare_workout', data),
+                                model_response(text='Разделите тренировку')])
+    reply = await agent.answer(journal, 'Жим, 62 подхода', 'group:limit')
+    assert reply.draft_id is None
+    assert journal.context()['pending_draft'] is None
+    assert count_sets(journal) == 0
+
+
+async def test_complex_rounds_without_weight_or_reps_can_be_previewed_and_saved(journal):
+    with journal.db.session() as session:
+        session.add(Exercise(code='AB06', name='Комплекс экстензия-пресс'))
+    data = workout()
+    data.update(week=2, program_session=3)
+    data['sets'] = [dict(data['sets'][0], exercise_code='AB06',
+                        raw_name='Комплекс экстензия-пресс', weight=None, reps=None, count=3)]
+    agent, client = fake_agent([model_response('prepare_workout', data)])
+    reply = await agent.answer(journal, 'Комплекс экстензия-пресс /3', 'complex:1')
+    assert reply.draft_id
+    assert 'Комплекс экстензия-пресс\n/3\n' in reply.text
+    assert 'неделя 2' in reply.text and 'занятие 3' in reply.text
+    journal.confirm(reply.draft_id)
+    assert count_sets(journal) == 3
+    last = Application(agent.settings, journal.db, agent).last(journal)
+    assert last.text.count('без веса и повторений') == 3
+
+
+async def test_other_exercises_still_require_reps_or_time(journal):
+    data = workout()
+    data['sets'][0].update(weight=None, reps=None)
+    agent, client = fake_agent([model_response('prepare_workout', data),
+                                model_response(text='Укажите повторения')])
+    reply = await agent.answer(journal, 'Синтетический жим /3', 'empty:1')
+    assert reply.draft_id is None
+    assert count_sets(journal) == 0
+
+
+async def test_truncated_model_response_never_executes_write(journal):
+    response = model_response('prepare_workout', workout())
+    response.status = 'incomplete'
+    agent, client = fake_agent([response])
+    reply = await agent.answer(journal, 'Тренировка', 'truncated:1')
+    assert 'оборвался' in reply.text
+    assert reply.draft_id is None
+    assert journal.context()['pending_draft'] is None
+
+
+async def test_parsed_workout_uses_only_model_exercise_selection(journal):
+    text = '01.09.2026\nТренировка 2 (неделя 1)\n1. Синтетический жим\nх 6 х 5\n20х(10х2) /2'
+    agent, client = fake_agent([model_response('prepare_parsed_workout', {
+        'exercises': [{'exercise_index': 0, 'exercise_code': 'SYN'}]})])
+    reply = await agent.answer(journal, text, 'parsed:1')
+    assert reply.draft_id
+    payload = journal.context()['pending_draft']['payload']
+    assert len(payload['sets']) == 2
+    assert all(row['reps'] == 10 for row in payload['sets'])
+    assert all(row['note'] == 'на каждую руку/ногу' for row in payload['sets'])
+    assert payload['original'] == text
+    tools = client.responses.create.call_args.kwargs['tools']
+    assert 'prepare_workout' not in {tool['name'] for tool in tools}
+
+
+async def test_explicit_alternative_is_asked_before_model_then_whole_entry_is_recovered(journal):
+    text = '01.09.2026\nТренировка 2 (неделя 1)\n1. Жим со штангой или гантелями\n20х10 /3'
+    agent, client = fake_agent([model_response('prepare_parsed_workout', {
+        'exercises': [{'exercise_index': 0, 'exercise_code': 'SYN'}]})])
+    first = await agent.answer(journal, text, 'choice:1')
+    assert first.draft_id is None
+    client.responses.create.assert_not_called()
+    reply = await agent.answer(journal, 'Со штангой', 'choice:2')
+    assert reply.draft_id
+    payload = journal.context()['pending_draft']['payload']
+    assert len(payload['sets']) == 3
+    assert text in payload['original'] and 'Со штангой' in payload['original']
+
+
 async def test_invalid_model_write_cannot_create_unknown_exercise(journal):
     data = workout()
     data["sets"][0]["exercise_code"] = "INVENTED"
@@ -114,6 +215,29 @@ async def test_daily_budget_prevents_model_call(journal):
     result = await agent.answer(journal, "покажи рекорд", "message:42:3")
     assert "лимит" in result.text
     assert client.responses.create.call_count == 0
+
+
+@pytest.mark.parametrize("text", [
+    "Тестовый жим х 6 х 5", "26.10.2026\nТестовый жим х 6 х 5",
+    "26.10.2026 в Орёл\nТестовый жим x6 /5\nДругой жим ×8×3",
+])
+async def test_only_unweighted_rows_skip_without_model_or_draft(journal, text):
+    agent, client = fake_agent([])
+    reply = await agent.answer(journal, text, "skip:1")
+    assert "пропущены" in reply.text
+    assert reply.draft_id is None
+    assert journal.context()["pending_draft"] is None
+    assert count_sets(journal) == 0
+    client.responses.create.assert_not_called()
+
+
+@pytest.mark.parametrize("text", [
+    "", "26.10.2026", "Жим 0х6 /5", "Жим -20х6 /5", "Жим 82,5х6 /5",
+    "Жим 15х(10х2) /4", "Ходьба 20 минут", "Почему пропущен жим х 6 х 5?",
+    "Жим х 6 х 5\nЖим 40х8 /2", "Покажи тренировку\nЖим х 6 х 5",
+])
+def test_skip_fast_path_leaves_valid_or_conversational_input(text):
+    assert not only_unweighted_notation(text)
 
 
 async def test_voice_converts_audio_and_cleans_temporary_files(journal, tmp_path):
